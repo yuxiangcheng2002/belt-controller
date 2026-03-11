@@ -67,16 +67,31 @@ static void build_gp_report(ble_hid_gp_report_t *report,
     }
 }
 
-/* Profile-colored LED: blue = keyboard, green = gamepad */
-static void set_profile_led(profile_t profile, bool idle)
+/* Per-button LED feedback.
+   LED 0 = right key (button B), LED 1 = left key (button A).
+   Profile color: blue = keyboard, green = gamepad.
+   Pressed button LED goes bright, unpressed stays dim. */
+static void update_leds(profile_t profile, const dualkey_buttons_t *buttons, bool idle)
 {
-    uint8_t r = 0, g = 0, b = 0;
-    if (profile == PROFILE_KEYBOARD) {
-        b = idle ? 16 : 96;
-    } else {
-        g = idle ? 16 : 96;
+    uint8_t dim = 16, bright = 96;
+    uint8_t a_r = 0, a_g = 0, a_b = 0;
+    uint8_t b_r = 0, b_g = 0, b_b = 0;
+
+    if (!idle) {
+        uint8_t a_val = buttons->button_a ? bright : dim;
+        uint8_t b_val = buttons->button_b ? bright : dim;
+        if (profile == PROFILE_KEYBOARD) {
+            a_b = a_val;
+            b_b = b_val;
+        } else {
+            a_g = a_val;
+            b_g = b_val;
+        }
     }
-    dualkey_set_rgb(r, g, b, true);
+
+    /* LED 1 = left key = button A, LED 0 = right key = button B */
+    dualkey_set_led(DUALKEY_LED_LEFT, a_r, a_g, a_b);
+    dualkey_set_led(DUALKEY_LED_RIGHT, b_r, b_g, b_b);
 }
 
 static void controller_task(void *arg)
@@ -110,7 +125,7 @@ static void controller_task(void *arg)
     ble_hid_kb_report_t last_kb = {0};
     ble_hid_gp_report_t last_gp = {0};
 
-    set_profile_led(profile, false);
+    update_leds(profile, &(dualkey_buttons_t){0}, false);
     ESP_LOGI(TAG, "Starting in keyboard profile");
 
     while (true) {
@@ -138,7 +153,7 @@ static void controller_task(void *arg)
                 /* Flash LED to confirm */
                 dualkey_set_rgb(96, 96, 96, true);
                 vTaskDelay(pdMS_TO_TICKS(200));
-                set_profile_led(profile, false);
+                update_leds(profile, &(dualkey_buttons_t){0}, false);
 
                 /* Send empty reports to release any held keys/buttons */
                 ble_hid_kb_report_t kb_empty = {0};
@@ -187,7 +202,7 @@ static void controller_task(void *arg)
 
         /* LED feedback */
         bool idle = (now - last_activity_ms) >= APP_IDLE_LED_TIMEOUT_MS;
-        set_profile_led(profile, idle);
+        update_leds(profile, &buttons, idle);
 
         if (has_joystick) {
             if (idle) {

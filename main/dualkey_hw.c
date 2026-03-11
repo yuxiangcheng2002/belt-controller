@@ -25,7 +25,7 @@ esp_err_t dualkey_hw_init(void)
 
     const led_strip_config_t strip_config = {
         .strip_gpio_num = DUALKEY_WS2812_GPIO,
-        .max_leds = 1,
+        .max_leds = DUALKEY_LED_COUNT,
         .led_model = LED_MODEL_WS2812,
         .led_pixel_format = LED_PIXEL_FORMAT_GRB,
         .flags = {
@@ -56,6 +56,19 @@ dualkey_buttons_t dualkey_read_buttons(void)
     return state;
 }
 
+esp_err_t dualkey_set_led(int index, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (s_led_strip == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (index < 0 || index >= DUALKEY_LED_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, index, r, g, b));
+    return led_strip_refresh(s_led_strip);
+}
+
 esp_err_t dualkey_set_rgb(uint8_t r, uint8_t g, uint8_t b, bool enabled)
 {
     if (s_led_strip == NULL) {
@@ -63,6 +76,13 @@ esp_err_t dualkey_set_rgb(uint8_t r, uint8_t g, uint8_t b, bool enabled)
     }
 
     ESP_ERROR_CHECK(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 1 : 0));
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, r, g, b));
+    for (int i = 0; i < DUALKEY_LED_COUNT; i++) {
+        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, r, g, b));
+    }
     return led_strip_refresh(s_led_strip);
+}
+
+esp_err_t dualkey_led_power(bool enabled)
+{
+    return gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 1 : 0);
 }
