@@ -48,15 +48,23 @@ static void build_kb_report(ble_hid_kb_report_t *report,
     }
 }
 
-/* Build gamepad report from current inputs */
+/* Build gamepad report from current inputs.
+   Without joystick: buttons map to L/R (x-axis extremes). */
 static void build_gp_report(ble_hid_gp_report_t *report,
                               const dualkey_buttons_t *buttons,
-                              const chain_joystick_sample_t *joy)
+                              const chain_joystick_sample_t *joy,
+                              bool has_joystick)
 {
     report->buttons = (uint8_t)((buttons->button_a ? 0x01 : 0x00) |
                                  (buttons->button_b ? 0x02 : 0x00));
-    report->x = joy->x_raw;
-    report->y = joy->y_raw;
+    if (has_joystick) {
+        report->x = joy->x_raw;
+        report->y = joy->y_raw;
+    } else {
+        /* A = left, B = right, neither = center */
+        report->x = buttons->button_a ? 0 : (buttons->button_b ? 4095 : 2048);
+        report->y = 2048;
+    }
 }
 
 /* Profile-colored LED: blue = keyboard, green = gamepad */
@@ -165,7 +173,7 @@ static void controller_task(void *arg)
             }
         } else {
             ble_hid_gp_report_t gp;
-            build_gp_report(&gp, &buttons, &joy_sample);
+            build_gp_report(&gp, &buttons, &joy_sample, has_joystick);
             changed = memcmp(&gp, &last_gp, sizeof(gp)) != 0;
             if (changed && ble_hid_connected()) {
                 ble_hid_send_gamepad(&gp);
