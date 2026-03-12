@@ -5,7 +5,6 @@
 #include "esp_timer.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
-#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -25,19 +24,9 @@ typedef enum {
 /* Survives deep sleep — chip reboots but RTC memory persists */
 static RTC_DATA_ATTR profile_t s_saved_profile = PROFILE_KEYBOARD;
 
-static TaskHandle_t s_controller_task;
-
 static uint32_t uptime_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
-}
-
-/* GPIO ISR — wakes controller task from idle sleep */
-static void IRAM_ATTR button_isr(void *arg)
-{
-    BaseType_t woken = pdFALSE;
-    vTaskNotifyGiveFromISR(s_controller_task, &woken);
-    portYIELD_FROM_ISR(woken);
 }
 
 static void enter_deep_sleep(void)
@@ -184,24 +173,6 @@ static void controller_task(void *arg)
         chain_joystick_deinit(&joystick);
     }
 
-    /* GPIO ISR for button wake from idle */
-    s_controller_task = xTaskGetCurrentTaskHandle();
-    gpio_set_intr_type(DUALKEY_BUTTON_A_GPIO, GPIO_INTR_NEGEDGE);
-    gpio_set_intr_type(DUALKEY_BUTTON_B_GPIO, GPIO_INTR_NEGEDGE);
-    esp_err_t isr_err = gpio_install_isr_service(0);
-    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service failed: %s", esp_err_to_name(isr_err));
-    }
-    ESP_ERROR_CHECK(gpio_isr_handler_add(DUALKEY_BUTTON_A_GPIO, button_isr, NULL));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(DUALKEY_BUTTON_B_GPIO, button_isr, NULL));
-    ESP_LOGI(TAG, "Button ISRs installed on GPIO %d and %d",
-             DUALKEY_BUTTON_A_GPIO, DUALKEY_BUTTON_B_GPIO);
-
-    /* GPIO wakeup from light sleep (buttons are active-low) */
-    gpio_wakeup_enable(DUALKEY_BUTTON_A_GPIO, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable(DUALKEY_BUTTON_B_GPIO, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-
     /* Restore profile from RTC memory (survives deep sleep) */
     profile_t profile = s_saved_profile;
     uint32_t last_activity_ms = uptime_ms();
@@ -243,19 +214,33 @@ static void controller_task(void *arg)
         /* --- Profile toggle: hold both buttons for 2s --- */
         bool both = buttons.button_a && buttons.button_b;
 
-        if (both && !toggle_pending) {
-            if (both_pressed_since == 0) {
-                both_pressed_since = now;
-            }
-            if ((now - both_pressed_since) >= APP_PROFILE_TOGGLE_MS) {
+        if (both && both_pressed_since == 0) {
+            both_pressed_since = now;
+            toggle_pending = false;
+        }
+
+        if (both && !toggle_pending &&
+            (now - both_pressed_since) >= APP_PROFILE_TOGGLE_MS) {
+            toggle_pending = true;
+            ESP_LOGI(TAG, "Profile switch armed; release both buttons to confirm");
+        }
+
+        /* Reserve the entire both-button gesture for profile switching.
+           Once armed, keep consuming input until both buttons are released. */
+        if (both || toggle_pending) {
+            last_activity_ms = now;
+
+            if (toggle_pending && !buttons.button_a && !buttons.button_b) {
                 profile = (profile == PROFILE_KEYBOARD)
                               ? PROFILE_GAMEPAD : PROFILE_KEYBOARD;
                 s_saved_profile = profile;
-                toggle_pending = true;
+                both_pressed_since = 0;
+                toggle_pending = false;
+
                 ESP_LOGI(TAG, "Profile → %s",
                          profile == PROFILE_KEYBOARD ? "keyboard" : "gamepad");
 
-                /* Flash LED to confirm */
+                /* Flash LED to confirm after the gesture completes. */
                 dualkey_set_rgb(96, 96, 96, true);
                 vTaskDelay(pdMS_TO_TICKS(200));
                 update_leds(profile, &(dualkey_buttons_t){0}, uptime_ms());
@@ -266,26 +251,21 @@ static void controller_task(void *arg)
                                            profile == PROFILE_KEYBOARD ? 64 : 0);
                 }
 
-                /* Send empty reports to release any held keys/buttons */
                 ble_hid_kb_report_t kb_empty = {0};
                 ble_hid_gp_report_t gp_empty = {0};
                 ble_hid_send_keyboard(&kb_empty);
                 ble_hid_send_gamepad(&gp_empty);
                 last_kb = kb_empty;
                 last_gp = gp_empty;
+                last_activity_ms = uptime_ms();
             }
-        }
-        if (!both) {
-            both_pressed_since = 0;
-            toggle_pending = false;
-        }
 
-        /* Suppress input while both buttons held (toggle gesture) */
-        if (both) {
-            last_activity_ms = now;
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
+            vTaskDelay(pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
             continue;
         }
+
+        both_pressed_since = 0;
+        toggle_pending = false;
 
         /* --- Build and send report for active profile --- */
         bool changed = false;
@@ -330,21 +310,19 @@ static void controller_task(void *arg)
 
             ESP_LOGI(TAG, "Idle — LEDs off, waiting for button");
 
-            /* Block until button press OR deep sleep timeout.
-               BLE stays connected at 15ms interval (no parameter change —
-               macOS rejects slave latency changes and drops the connection).
-               CPU just blocks on the notification; BLE stack runs in its own task. */
-            ulTaskNotifyTake(pdTRUE, 0);  /* drain pending */
-            uint32_t got = ulTaskNotifyTake(pdTRUE,
-                               pdMS_TO_TICKS(APP_DEEP_SLEEP_TIMEOUT_MS));
+            uint32_t idle_started_ms = uptime_ms();
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(APP_IDLE_POLL_MS));
 
-            if (got == 0) {
-                /* Timed out — no button press for 30 min, enter deep sleep.
-                   BLE disconnects. Bonding keys survive in NVS.
-                   On wake (button press), chip reboots and reconnects (~1-2s). */
-                dualkey_led_power(false);
-                enter_deep_sleep();
-                /* Never reaches here */
+                dualkey_buttons_t wake_buttons = dualkey_read_buttons();
+                if (wake_buttons.button_a || wake_buttons.button_b) {
+                    break;
+                }
+
+                if ((uptime_ms() - idle_started_ms) >= APP_DEEP_SLEEP_TIMEOUT_MS) {
+                    dualkey_led_power(false);
+                    enter_deep_sleep();
+                }
             }
 
             /* Button press woke us — restore active state */
@@ -357,6 +335,13 @@ static void controller_task(void *arg)
 
             ESP_LOGI(TAG, "Wake → active");
             update_leds(profile, &(dualkey_buttons_t){0}, uptime_ms());
+            if (has_joystick) {
+                chain_joystick_set_brightness(&joystick, 20);
+                chain_joystick_set_rgb(&joystick,
+                                       profile == PROFILE_KEYBOARD ? 0 : 0,
+                                       profile == PROFILE_KEYBOARD ? 0 : 64,
+                                       profile == PROFILE_KEYBOARD ? 64 : 0);
+            }
             continue;
         }
 
@@ -367,8 +352,7 @@ static void controller_task(void *arg)
             last_led_ms = now;
         }
 
-        /* Wait for next poll or immediate button event */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
+        vTaskDelay(pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
     }
 }
 
