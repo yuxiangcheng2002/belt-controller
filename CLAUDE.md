@@ -1,17 +1,17 @@
 # Belt Controller
 
 ESP-IDF 5.x firmware for ESP32-S3 (M5Stack DualKey + Chain Joystick).
-Connects to Mac as a composite BLE HID device (keyboard + gamepad) via NimBLE.
+Connects to Mac/iPad/DAW hosts as a BLE MIDI controller via NimBLE.
 
 ## Architecture
-- `ble_hid.c/h` — Composite NimBLE HID: Report ID 1 (keyboard) + Report ID 2 (gamepad). Handles advertising, pairing, GATT services.
+- `ble_midi.c/h` — BLE MIDI service + characteristic (official MIDI UUIDs). Handles advertising, GATT services, and packetized MIDI notifications.
 - `dualkey_hw.c/h` — Button reading (GPIO0, GPIO17) and WS2812 LED on DualKey board.
 - `chain_joystick.c/h` — UART chain protocol for M5Stack Chain Joystick. Modular: deinits UART if not detected (power saving).
-- `app_main.c` — Profile switching, input mapping, LED feedback.
+- `app_main.c` — Profile switching, MIDI mapping, LED feedback, power management.
 
 ## Profiles
-- **Keyboard** (blue LED): Joystick left/right → arrow keys, Button A → Left, Button B → Right. Great for presentations.
-- **Gamepad** (green LED): Raw joystick X/Y + 2 buttons as HID gamepad.
+- **Notes** (blue LED): Button A/B and joystick directions emit MIDI notes.
+- **CC** (green LED): Buttons emit on/off CC values and joystick X/Y emit continuous CCs.
 - **Toggle**: Hold both buttons for 2 seconds. White flash confirms switch.
 
 ## Build
@@ -27,28 +27,26 @@ Three-tier model: **ACTIVE** → **IDLE** → **DEEP SLEEP**.
 
 - **ACTIVE** (~55mA): BLE 15ms interval, latency 0, 20ms poll loop, LEDs on.
 - **IDLE** (after 30s, ~1–3mA): LEDs + power rail off, light sleep via tickless idle. Button press wakes instantly.
-- **DEEP SLEEP** (after 30min idle, ~108μA): Full deep sleep. BLE disconnects. Bonding keys persist in NVS. Button press reboots chip → BLE reconnects (~1–2s). Profile survives via `RTC_DATA_ATTR`.
+- **DEEP SLEEP** (after 30min idle, ~108μA): Full deep sleep. BLE disconnects. Button press reboots chip → BLE reconnects (~1–2s). Profile survives via `RTC_DATA_ATTR`.
 
 Key config:
 - `CONFIG_PM_ENABLE=y` + `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y`
-- `CONFIG_BT_NIMBLE_NVS_PERSIST=y` — bonding survives deep sleep/reboot
 - `esp_sleep_enable_ext1_wakeup_io()` on GPIO0 + GPIO17 for deep sleep wake
 - `gpio_wakeup_enable()` on both buttons for light sleep wake
 
 ## Key decisions
-- Composite HID (keyboard + gamepad in one descriptor) — no re-pairing needed when switching profiles.
-- "Just Works" pairing — macOS requires encryption for HID.
+- BLE MIDI transport instead of HID — better fit for synths, DAWs, and Audio MIDI Setup on Apple hosts.
+- Two controller profiles share the same BLE MIDI endpoint, so profile changes do not require reconnecting.
 - Joystick is modular: if probe fails, UART is deinitialized to save power. Runs buttons-only.
 - Both-button simultaneous press is reserved for profile toggle, never sent as input.
 - LED refresh rate-limited to ~33Hz (30ms) — 200Hz (every 5ms poll) caused Interrupt WDT timeout because RMT refresh is slow.
 - Joystick UART reads rate-limited to ~50Hz (20ms) to avoid blocking.
 - Joystick LED commands (set_brightness, set_rgb) only at startup/profile-change — each does full UART round-trip with 50ms timeout, can't be in hot loop.
-- No `ble_gap_update_params` calls — macOS rejects slave latency changes and drops the connection.
-- Appearance 0x03C1 (Keyboard) so macOS auto-selects fast HID interval.
-- BLE encryption error handler: on ENC_CHANGE failure (stale bond), clears bond and disconnects for clean reconnection.
+- The BLE MIDI characteristic is notify/write capable so hosts can subscribe normally.
+- Security is left open by default; unlike HID, BLE MIDI does not need enforced pairing to work with macOS/iPadOS.
 
 ## Dead ends / constraints
-- Single HID descriptor approach (gamepad only) doesn't work for presentation arrow keys — macOS needs keyboard HID for that.
+- HID-specific decisions from the old presentation/gamepad firmware no longer apply in the MIDI fork.
 - `CONFIG_BT_LE_SLEEP_ENABLE` does not exist for ESP32-S3 — only for C2/C5/C6/H2. S3 BT controller sleeps automatically via PM framework.
 - `ble_store_config_init()` removed in ESP-IDF 5.5 NimBLE — store auto-inits when `CONFIG_BT_NIMBLE_NVS_PERSIST=y`.
 - Arduino ESP32 2.0.x port failed: Adafruit NeoPixel and `neopixelWrite` both fail to drive WS2812 LEDs on this board. USB CDC serial output never worked either. Multiple platform incompatibilities with 2MB flash ESP32-S3.

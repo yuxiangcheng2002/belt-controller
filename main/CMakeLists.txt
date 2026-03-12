@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.c"
-        "ble_hid.c"
+        "ble_midi.c"
         "chain_joystick.c"
         "dualkey_hw.c"
     INCLUDE_DIRS

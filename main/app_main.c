@@ -1,122 +1,174 @@
 #include <string.h>
 
-#include "nvs_flash.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
-#include "driver/gpio.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 #include "app_config.h"
+#include "ble_midi.h"
 #include "board_pins.h"
-#include "ble_hid.h"
 #include "chain_joystick.h"
 #include "dualkey_hw.h"
 
 static const char *TAG = "app";
 
 typedef enum {
-    PROFILE_KEYBOARD,
-    PROFILE_GAMEPAD,
+    PROFILE_NOTES,
+    PROFILE_CC,
 } profile_t;
 
-/* Survives deep sleep — chip reboots but RTC memory persists */
-static RTC_DATA_ATTR profile_t s_saved_profile = PROFILE_KEYBOARD;
+typedef struct {
+    bool button_a;
+    bool button_b;
+    bool joy_left;
+    bool joy_right;
+    bool joy_up;
+    bool joy_down;
+} midi_note_state_t;
 
-static TaskHandle_t s_controller_task;
+typedef struct {
+    uint8_t button_a;
+    uint8_t button_b;
+    uint8_t joy_x;
+    uint8_t joy_y;
+} midi_cc_state_t;
+
+static RTC_DATA_ATTR profile_t s_saved_profile = PROFILE_NOTES;
 
 static uint32_t uptime_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
-/* GPIO ISR — wakes controller task from idle sleep */
-static void IRAM_ATTR button_isr(void *arg)
+static uint8_t midi_scale_7bit(uint16_t raw)
 {
-    BaseType_t woken = pdFALSE;
-    vTaskNotifyGiveFromISR(s_controller_task, &woken);
-    portYIELD_FROM_ISR(woken);
+    if (raw > JOY_AXIS_MAX) {
+        raw = JOY_AXIS_MAX;
+    }
+
+    return (uint8_t)((raw * 127U + (JOY_AXIS_MAX / 2U)) / JOY_AXIS_MAX);
 }
 
 static void enter_deep_sleep(void)
 {
     ESP_LOGI(TAG, "Entering deep sleep");
 
-    /* EXT1 wakeup on either button (active-low → wake on ANY_LOW).
-       Both GPIOs 0 and 17 are RTC-capable on ESP32-S3. */
     esp_sleep_enable_ext1_wakeup_io(
         (1ULL << DUALKEY_BUTTON_A_GPIO) | (1ULL << DUALKEY_BUTTON_B_GPIO),
         ESP_EXT1_WAKEUP_ANY_LOW);
-
-    /* Keep RTC peripherals powered so internal pull-ups stay active */
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
 
     esp_deep_sleep_start();
-    /* Never returns — chip reboots on wake */
 }
 
-/* Build keyboard report from current inputs */
-static void build_kb_report(ble_hid_kb_report_t *report,
+static void build_note_state(midi_note_state_t *state,
                              const dualkey_buttons_t *buttons,
                              const chain_joystick_sample_t *joy,
                              bool has_joystick)
 {
-    memset(report, 0, sizeof(*report));
-    int idx = 0;
+    memset(state, 0, sizeof(*state));
+    state->button_a = buttons->button_a;
+    state->button_b = buttons->button_b;
 
-    if (buttons->button_a && idx < 6) {
-        report->keycodes[idx++] = KEY_LEFT;
-    }
-    if (buttons->button_b && idx < 6) {
-        report->keycodes[idx++] = KEY_RIGHT;
-    }
     if (has_joystick) {
-        if (joy->x_raw < JOY_LEFT_THRESHOLD && idx < 6) {
-            report->keycodes[idx++] = KEY_LEFT;
-        } else if (joy->x_raw > JOY_RIGHT_THRESHOLD && idx < 6) {
-            report->keycodes[idx++] = KEY_RIGHT;
-        }
+        state->joy_left = joy->x_raw < JOY_LEFT_THRESHOLD;
+        state->joy_right = joy->x_raw > JOY_RIGHT_THRESHOLD;
+        state->joy_up = joy->y_raw < JOY_UP_THRESHOLD;
+        state->joy_down = joy->y_raw > JOY_DOWN_THRESHOLD;
     }
 }
 
-/* Build gamepad report from current inputs.
-   Without joystick: buttons map to L/R (x-axis extremes). */
-static void build_gp_report(ble_hid_gp_report_t *report,
-                              const dualkey_buttons_t *buttons,
-                              const chain_joystick_sample_t *joy,
-                              bool has_joystick)
+static void build_cc_state(midi_cc_state_t *state,
+                           const dualkey_buttons_t *buttons,
+                           const chain_joystick_sample_t *joy,
+                           bool has_joystick)
 {
-    report->buttons = (uint8_t)((buttons->button_a ? 0x01 : 0x00) |
-                                 (buttons->button_b ? 0x02 : 0x00));
-    if (has_joystick) {
-        report->x = joy->x_raw;
-        report->y = joy->y_raw;
-    } else {
-        /* A = left, B = right, neither = center */
-        report->x = buttons->button_a ? 0 : (buttons->button_b ? 4095 : 2048);
-        report->y = 2048;
-    }
+    state->button_a = buttons->button_a ? 127 : 0;
+    state->button_b = buttons->button_b ? 127 : 0;
+    state->joy_x = has_joystick ? midi_scale_7bit(joy->x_raw) : 64;
+    state->joy_y = has_joystick ? (uint8_t)(127 - midi_scale_7bit(joy->y_raw)) : 64;
 }
 
-/* ---- Reactive LED system ----
-   Bright flash on press, smooth exponential fade on release,
-   gentle breathing when idle. Matches M5Stack stock firmware feel. */
+static void send_note_transition(bool previous, bool current, uint8_t note)
+{
+    if (previous == current) {
+        return;
+    }
 
-#define LED_BRIGHT     255   /* Peak brightness on press */
-#define LED_DIM        20    /* Base idle brightness */
-#define LED_FADE_RATE  6     /* Fade per 5ms tick: ~60ms to half brightness */
-#define BREATH_PERIOD  3000  /* Breathing cycle in ms */
-#define BREATH_AMP     12    /* Breathing amplitude (added to dim) */
+    ble_midi_send_note(APP_MIDI_CHANNEL, note,
+                       current ? APP_MIDI_NOTE_VELOCITY : 0,
+                       current);
+}
 
-/* Simple 8-bit sine approximation (0-255 input → 0-255 output, centered at 128) */
+static void send_note_changes(const midi_note_state_t *previous,
+                              const midi_note_state_t *current)
+{
+    send_note_transition(previous->button_a, current->button_a, APP_MIDI_NOTE_BUTTON_A);
+    send_note_transition(previous->button_b, current->button_b, APP_MIDI_NOTE_BUTTON_B);
+    send_note_transition(previous->joy_left, current->joy_left, APP_MIDI_NOTE_LEFT);
+    send_note_transition(previous->joy_right, current->joy_right, APP_MIDI_NOTE_RIGHT);
+    send_note_transition(previous->joy_up, current->joy_up, APP_MIDI_NOTE_UP);
+    send_note_transition(previous->joy_down, current->joy_down, APP_MIDI_NOTE_DOWN);
+}
+
+static void release_notes(midi_note_state_t *state)
+{
+    static const midi_note_state_t empty = {0};
+    send_note_changes(state, &empty);
+    *state = empty;
+}
+
+static void send_cc_if_changed(uint8_t previous, uint8_t current, uint8_t controller)
+{
+    if (previous == current) {
+        return;
+    }
+
+    ble_midi_send_control_change(APP_MIDI_CHANNEL, controller, current);
+}
+
+static void send_cc_changes(const midi_cc_state_t *previous,
+                            const midi_cc_state_t *current)
+{
+    send_cc_if_changed(previous->button_a, current->button_a, APP_MIDI_CC_BUTTON_A);
+    send_cc_if_changed(previous->button_b, current->button_b, APP_MIDI_CC_BUTTON_B);
+    send_cc_if_changed(previous->joy_x, current->joy_x, APP_MIDI_CC_JOY_X);
+    send_cc_if_changed(previous->joy_y, current->joy_y, APP_MIDI_CC_JOY_Y);
+}
+
+static void reset_ccs(midi_cc_state_t *state)
+{
+    const midi_cc_state_t neutral = {
+        .button_a = 0,
+        .button_b = 0,
+        .joy_x = 64,
+        .joy_y = 64,
+    };
+
+    send_cc_changes(state, &neutral);
+    *state = neutral;
+}
+
+/* ---- Reactive LED system ---- */
+
+#define LED_BRIGHT     255
+#define LED_DIM        20
+#define LED_FADE_RATE  6
+#define BREATH_PERIOD  3000
+#define BREATH_AMP     12
+#define PINK_GREEN_DIV 32
+#define PINK_BLUE_DIV  10
+
 static uint8_t sin8(uint8_t x)
 {
-    /* Parabolic sine approximation */
     uint8_t y = (x < 128) ? x : (255 - x);
     uint16_t s = (uint16_t)y * y;
-    return (uint8_t)(s >> 6);  /* scale to 0-255 range */
+    return (uint8_t)(s >> 6);
 }
 
 static uint8_t s_fade_a = LED_DIM;
@@ -125,13 +177,14 @@ static uint8_t s_fade_b = LED_DIM;
 static void update_leds(profile_t profile, const dualkey_buttons_t *buttons,
                         uint32_t now_ms)
 {
-    /* On press: snap to bright. On release: exponential decay. */
     if (buttons->button_a) {
         s_fade_a = LED_BRIGHT;
     } else if (s_fade_a > LED_DIM) {
         uint8_t decay = (s_fade_a > LED_FADE_RATE) ? LED_FADE_RATE : s_fade_a;
         s_fade_a -= decay;
-        if (s_fade_a < LED_DIM) s_fade_a = LED_DIM;
+        if (s_fade_a < LED_DIM) {
+            s_fade_a = LED_DIM;
+        }
     }
 
     if (buttons->button_b) {
@@ -139,27 +192,63 @@ static void update_leds(profile_t profile, const dualkey_buttons_t *buttons,
     } else if (s_fade_b > LED_DIM) {
         uint8_t decay = (s_fade_b > LED_FADE_RATE) ? LED_FADE_RATE : s_fade_b;
         s_fade_b -= decay;
-        if (s_fade_b < LED_DIM) s_fade_b = LED_DIM;
+        if (s_fade_b < LED_DIM) {
+            s_fade_b = LED_DIM;
+        }
     }
 
-    /* Breathing modulation on idle brightness */
     uint8_t phase = (uint8_t)((now_ms % BREATH_PERIOD) * 256 / BREATH_PERIOD);
     uint8_t breath = (uint8_t)((uint16_t)sin8(phase) * BREATH_AMP / 255);
 
     uint8_t a_val = (s_fade_a == LED_DIM) ? (LED_DIM + breath) : s_fade_a;
     uint8_t b_val = (s_fade_b == LED_DIM) ? (LED_DIM + breath) : s_fade_b;
 
-    /* Apply profile color */
-    uint8_t a_r = 0, a_g = 0, a_b = 0;
-    uint8_t b_r = 0, b_g = 0, b_b = 0;
-    if (profile == PROFILE_KEYBOARD) {
-        a_b = a_val; b_b = b_val;
+    uint8_t a_r = 0;
+    uint8_t a_g = 0;
+    uint8_t a_b = 0;
+    uint8_t b_r = 0;
+    uint8_t b_g = 0;
+    uint8_t b_b = 0;
+
+    if (profile == PROFILE_NOTES) {
+        a_b = a_val;
+        b_b = b_val;
     } else {
-        a_g = a_val; b_g = b_val;
+        a_r = a_val;
+        b_r = b_val;
+        a_g = a_val / PINK_GREEN_DIV;
+        b_g = b_val / PINK_GREEN_DIV;
+        a_b = a_val / PINK_BLUE_DIV;
+        b_b = b_val / PINK_BLUE_DIV;
     }
 
-    /* LED 0 = right key = button B, LED 1 = left key = button A */
     dualkey_set_leds(b_r, b_g, b_b, a_r, a_g, a_b);
+}
+
+static void apply_profile_color(profile_t profile, chain_joystick_t *joystick,
+                                bool has_joystick)
+{
+    update_leds(profile, &(dualkey_buttons_t){0}, uptime_ms());
+
+    if (!has_joystick) {
+        return;
+    }
+
+    chain_joystick_set_rgb(joystick,
+                           profile == PROFILE_CC ? 64 : 0,
+                           profile == PROFILE_CC ? 2 : 0,
+                           profile == PROFILE_NOTES ? 64 : 6);
+}
+
+static void clear_active_profile(profile_t profile,
+                                 midi_note_state_t *last_notes,
+                                 midi_cc_state_t *last_ccs)
+{
+    if (profile == PROFILE_NOTES) {
+        release_notes(last_notes);
+    } else {
+        reset_ccs(last_ccs);
+    }
 }
 
 static void controller_task(void *arg)
@@ -168,13 +257,20 @@ static void controller_task(void *arg)
     chain_joystick_sample_t joy_sample = {0};
     bool has_joystick = false;
 
-    /* Hardware init */
+    midi_note_state_t last_notes = {0};
+    midi_cc_state_t last_ccs = {
+        .button_a = 0,
+        .button_b = 0,
+        .joy_x = 64,
+        .joy_y = 64,
+    };
+
     ESP_ERROR_CHECK(dualkey_hw_init());
-    /* Try chain joystick on right connector */
     ESP_ERROR_CHECK(chain_joystick_init(&joystick, CHAIN_JOYSTICK_UART_PORT,
-                                         DUALKEY_CHAIN_RIGHT_TX_GPIO,
-                                         DUALKEY_CHAIN_RIGHT_RX_GPIO,
-                                         CHAIN_JOYSTICK_DEVICE_ID));
+                                        DUALKEY_CHAIN_RIGHT_TX_GPIO,
+                                        DUALKEY_CHAIN_RIGHT_RX_GPIO,
+                                        CHAIN_JOYSTICK_DEVICE_ID));
+
     if (chain_joystick_probe(&joystick) == ESP_OK) {
         has_joystick = true;
         chain_joystick_set_brightness(&joystick, 20);
@@ -184,145 +280,96 @@ static void controller_task(void *arg)
         chain_joystick_deinit(&joystick);
     }
 
-    /* GPIO ISR for button wake from idle */
-    s_controller_task = xTaskGetCurrentTaskHandle();
-    gpio_set_intr_type(DUALKEY_BUTTON_A_GPIO, GPIO_INTR_NEGEDGE);
-    gpio_set_intr_type(DUALKEY_BUTTON_B_GPIO, GPIO_INTR_NEGEDGE);
-    esp_err_t isr_err = gpio_install_isr_service(0);
-    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service failed: %s", esp_err_to_name(isr_err));
-    }
-    ESP_ERROR_CHECK(gpio_isr_handler_add(DUALKEY_BUTTON_A_GPIO, button_isr, NULL));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(DUALKEY_BUTTON_B_GPIO, button_isr, NULL));
-    ESP_LOGI(TAG, "Button ISRs installed on GPIO %d and %d",
-             DUALKEY_BUTTON_A_GPIO, DUALKEY_BUTTON_B_GPIO);
-
-    /* GPIO wakeup from light sleep (buttons are active-low) */
-    gpio_wakeup_enable(DUALKEY_BUTTON_A_GPIO, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable(DUALKEY_BUTTON_B_GPIO, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-
-    /* Restore profile from RTC memory (survives deep sleep) */
     profile_t profile = s_saved_profile;
     uint32_t last_activity_ms = uptime_ms();
     uint32_t both_pressed_since = 0;
+    uint32_t last_led_ms = 0;
+    uint32_t last_joy_read_ms = 0;
     bool toggle_pending = false;
 
-    /* Previous reports for change detection */
-    ble_hid_kb_report_t last_kb = {0};
-    ble_hid_gp_report_t last_gp = {0};
-    uint32_t last_led_ms = 0;  /* Rate-limit LED refresh to ~33Hz */
-
-    /* Startup flash — confirms LEDs work */
     dualkey_set_rgb(64, 64, 64, true);
     vTaskDelay(pdMS_TO_TICKS(300));
-    update_leds(profile, &(dualkey_buttons_t){0}, uptime_ms());
+    apply_profile_color(profile, &joystick, has_joystick);
+
     if (has_joystick) {
         chain_joystick_set_brightness(&joystick, 20);
-        chain_joystick_set_rgb(&joystick,
-                               profile == PROFILE_KEYBOARD ? 0 : 0,
-                               profile == PROFILE_KEYBOARD ? 0 : 64,
-                               profile == PROFILE_KEYBOARD ? 64 : 0);
     }
-    ESP_LOGI(TAG, "Starting in %s profile, joystick=%s",
-             profile == PROFILE_KEYBOARD ? "keyboard" : "gamepad",
-             has_joystick ? "YES" : "NO");
 
-    uint32_t last_joy_read_ms = 0;
+    ESP_LOGI(TAG, "Starting in %s profile, joystick=%s",
+             profile == PROFILE_NOTES ? "notes" : "cc",
+             has_joystick ? "YES" : "NO");
 
     while (true) {
         uint32_t now = uptime_ms();
         dualkey_buttons_t buttons = dualkey_read_buttons();
+        bool both = buttons.button_a && buttons.button_b;
 
-        /* Rate-limit joystick UART reads (~50Hz) to avoid blocking */
         if (has_joystick && (now - last_joy_read_ms) >= 20) {
             chain_joystick_read_raw(&joystick, &joy_sample);
             last_joy_read_ms = now;
         }
 
-        /* --- Profile toggle: hold both buttons for 2s --- */
-        bool both = buttons.button_a && buttons.button_b;
-
-        if (both && !toggle_pending) {
-            if (both_pressed_since == 0) {
-                both_pressed_since = now;
-            }
-            if ((now - both_pressed_since) >= APP_PROFILE_TOGGLE_MS) {
-                profile = (profile == PROFILE_KEYBOARD)
-                              ? PROFILE_GAMEPAD : PROFILE_KEYBOARD;
-                s_saved_profile = profile;
-                toggle_pending = true;
-                ESP_LOGI(TAG, "Profile → %s",
-                         profile == PROFILE_KEYBOARD ? "keyboard" : "gamepad");
-
-                /* Flash LED to confirm */
-                dualkey_set_rgb(96, 96, 96, true);
-                vTaskDelay(pdMS_TO_TICKS(200));
-                update_leds(profile, &(dualkey_buttons_t){0}, uptime_ms());
-                if (has_joystick) {
-                    chain_joystick_set_rgb(&joystick,
-                                           profile == PROFILE_KEYBOARD ? 0 : 0,
-                                           profile == PROFILE_KEYBOARD ? 0 : 64,
-                                           profile == PROFILE_KEYBOARD ? 64 : 0);
-                }
-
-                /* Send empty reports to release any held keys/buttons */
-                ble_hid_kb_report_t kb_empty = {0};
-                ble_hid_gp_report_t gp_empty = {0};
-                ble_hid_send_keyboard(&kb_empty);
-                ble_hid_send_gamepad(&gp_empty);
-                last_kb = kb_empty;
-                last_gp = gp_empty;
-            }
-        }
-        if (!both) {
-            both_pressed_since = 0;
+        if (both && both_pressed_since == 0) {
+            both_pressed_since = now;
             toggle_pending = false;
         }
 
-        /* Suppress input while both buttons held (toggle gesture) */
-        if (both) {
+        if (both && !toggle_pending &&
+            (now - both_pressed_since) >= APP_PROFILE_TOGGLE_MS) {
+            toggle_pending = true;
+            ESP_LOGI(TAG, "Profile switch armed; release buttons to confirm");
+        }
+
+        if (!both) {
+            if (both_pressed_since != 0 && toggle_pending) {
+                clear_active_profile(profile, &last_notes, &last_ccs);
+
+                profile = (profile == PROFILE_NOTES) ? PROFILE_CC : PROFILE_NOTES;
+                s_saved_profile = profile;
+
+                ESP_LOGI(TAG, "Profile → %s", profile == PROFILE_NOTES ? "notes" : "cc");
+
+                dualkey_set_rgb(96, 96, 96, true);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                apply_profile_color(profile, &joystick, has_joystick);
+                last_activity_ms = uptime_ms();
+            }
+
+            both_pressed_since = 0;
+            toggle_pending = false;
+        } else {
             last_activity_ms = now;
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
+            vTaskDelay(pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
             continue;
         }
 
-        /* --- Build and send report for active profile --- */
         bool changed = false;
 
-        if (profile == PROFILE_KEYBOARD) {
-            ble_hid_kb_report_t kb;
-            build_kb_report(&kb, &buttons, &joy_sample, has_joystick);
-            changed = memcmp(&kb, &last_kb, sizeof(kb)) != 0;
-            if (changed && ble_hid_connected()) {
-                ble_hid_send_keyboard(&kb);
-                last_kb = kb;
+        if (profile == PROFILE_NOTES) {
+            midi_note_state_t notes;
+            build_note_state(&notes, &buttons, &joy_sample, has_joystick);
+            changed = memcmp(&notes, &last_notes, sizeof(notes)) != 0;
+            if (changed && ble_midi_connected()) {
+                send_note_changes(&last_notes, &notes);
             }
+            last_notes = notes;
         } else {
-            ble_hid_gp_report_t gp;
-            build_gp_report(&gp, &buttons, &joy_sample, has_joystick);
-            changed = memcmp(&gp, &last_gp, sizeof(gp)) != 0;
-            if (changed && ble_hid_connected()) {
-                ble_hid_send_gamepad(&gp);
-                last_gp = gp;
+            midi_cc_state_t ccs;
+            build_cc_state(&ccs, &buttons, &joy_sample, has_joystick);
+            changed = memcmp(&ccs, &last_ccs, sizeof(ccs)) != 0;
+            if (changed && ble_midi_connected()) {
+                send_cc_changes(&last_ccs, &ccs);
             }
+            last_ccs = ccs;
         }
 
         if (changed) {
             last_activity_ms = now;
         }
 
-        /* --- Idle check: enter low-power state after timeout --- */
         if ((now - last_activity_ms) >= APP_IDLE_TIMEOUT_MS) {
-            /* Release all keys/buttons before sleeping */
-            ble_hid_kb_report_t kb_empty = {0};
-            ble_hid_gp_report_t gp_empty = {0};
-            ble_hid_send_keyboard(&kb_empty);
-            ble_hid_send_gamepad(&gp_empty);
-            last_kb = kb_empty;
-            last_gp = gp_empty;
+            clear_active_profile(profile, &last_notes, &last_ccs);
 
-            /* LEDs off, power rail off */
             dualkey_led_power(false);
             if (has_joystick) {
                 chain_joystick_set_brightness(&joystick, 0);
@@ -330,24 +377,21 @@ static void controller_task(void *arg)
 
             ESP_LOGI(TAG, "Idle — LEDs off, waiting for button");
 
-            /* Block until button press OR deep sleep timeout.
-               BLE stays connected at 15ms interval (no parameter change —
-               macOS rejects slave latency changes and drops the connection).
-               CPU just blocks on the notification; BLE stack runs in its own task. */
-            ulTaskNotifyTake(pdTRUE, 0);  /* drain pending */
-            uint32_t got = ulTaskNotifyTake(pdTRUE,
-                               pdMS_TO_TICKS(APP_DEEP_SLEEP_TIMEOUT_MS));
+            uint32_t idle_started_ms = uptime_ms();
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(APP_IDLE_POLL_MS));
 
-            if (got == 0) {
-                /* Timed out — no button press for 30 min, enter deep sleep.
-                   BLE disconnects. Bonding keys survive in NVS.
-                   On wake (button press), chip reboots and reconnects (~1-2s). */
-                dualkey_led_power(false);
-                enter_deep_sleep();
-                /* Never reaches here */
+                dualkey_buttons_t wake_buttons = dualkey_read_buttons();
+                if (wake_buttons.button_a || wake_buttons.button_b) {
+                    break;
+                }
+
+                if ((uptime_ms() - idle_started_ms) >= APP_DEEP_SLEEP_TIMEOUT_MS) {
+                    dualkey_led_power(false);
+                    enter_deep_sleep();
+                }
             }
 
-            /* Button press woke us — restore active state */
             last_activity_ms = uptime_ms();
             dualkey_led_power(true);
             s_fade_a = LED_DIM;
@@ -356,19 +400,19 @@ static void controller_task(void *arg)
             toggle_pending = false;
 
             ESP_LOGI(TAG, "Wake → active");
-            update_leds(profile, &(dualkey_buttons_t){0}, uptime_ms());
+            apply_profile_color(profile, &joystick, has_joystick);
+            if (has_joystick) {
+                chain_joystick_set_brightness(&joystick, 20);
+            }
             continue;
         }
 
-        /* LED feedback (active mode) — rate-limited to ~33Hz to avoid
-           starving the interrupt WDT (RMT refresh is slow). */
         if ((now - last_led_ms) >= 30) {
             update_leds(profile, &buttons, now);
             last_led_ms = now;
         }
 
-        /* Wait for next poll or immediate button event */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
+        vTaskDelay(pdMS_TO_TICKS(APP_POLL_PERIOD_MS));
     }
 }
 
@@ -381,7 +425,6 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    /* Log wakeup source */
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     if (cause == ESP_SLEEP_WAKEUP_EXT1) {
         ESP_LOGI(TAG, "Woke from deep sleep (button press)");
@@ -389,8 +432,6 @@ void app_main(void)
         ESP_LOGI(TAG, "Woke from sleep (cause=%d)", (int)cause);
     }
 
-    /* Power management: frequency scaling only for now.
-       light_sleep_enable disabled until LED/RMT stability is confirmed. */
     const esp_pm_config_t pm_config = {
         .max_freq_mhz = 160,
         .min_freq_mhz = 80,
@@ -398,7 +439,7 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
 
-    ESP_ERROR_CHECK(ble_hid_init(APP_DEVICE_NAME));
+    ESP_ERROR_CHECK(ble_midi_init(APP_DEVICE_NAME));
 
     xTaskCreate(controller_task, "controller", 8192, NULL, 5, NULL);
 }

@@ -2,11 +2,11 @@
 
 ## High priority
 - [ ] **Fix chain joystick**: Switch to LEFT UART2 (TX=6, RX=5) and add enumeration sequence (heartbeat → enum → get device type). See CLAUDE.md "Joystick knowledge".
-- [ ] **BLE disconnect investigation**: Profile connection stability on macOS. Log disconnect reasons, check if encryption recovery is sufficient.
+- [ ] **BLE MIDI host testing**: Verify the new MIDI service on macOS Audio MIDI Setup, Ableton, and iPad hosts.
+- [ ] **Finalize MIDI mapping**: Tune note layout, CC numbers, and velocity/range based on actual musical workflow.
 
 ## Medium priority
 - [ ] **3-position switch**: Read GPIO 7/8, leftmost position = deep sleep / off, other positions = on.
-- [ ] **Joystick → keyboard mapping**: Left/right arrows from joystick X axis, Enter from button A, Escape from button B (presentation mode).
 - [ ] **Joystick LED feedback**: Set joystick ring LED color to match active profile.
 
 ## Low priority / nice-to-have

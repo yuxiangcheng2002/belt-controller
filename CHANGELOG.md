@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1-ble-midi-fork (2026-03-12)
+
+### Working
+- **BLE MIDI transport**: Replaced the composite HID stack with the standard BLE MIDI service/characteristic.
+- **Notes profile**: Blue LED mode sends MIDI notes from Button A/B plus joystick directions.
+- **CC profile**: Green LED mode sends button CC gates plus continuous joystick X/Y CC values.
+- **Profile switching**: Hold both buttons 2s → toggles Notes/CC. Existing white flash confirmation preserved.
+- **Safe gesture suppression**: Both-button toggle gesture now clears active notes/CCs immediately so it never leaves stale MIDI state behind.
+- **Power management**: Existing active/idle/deep-sleep behavior preserved for the MIDI fork.
+
 ## v1.0-stable-baseline (2026-03-12)
 
 ### Working
