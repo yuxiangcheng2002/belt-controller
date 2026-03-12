@@ -4,6 +4,7 @@ idf_component_register(
         "ble_hid.c"
         "chain_joystick.c"
         "dualkey_hw.c"
+        "ws2812_encoder.c"
     INCLUDE_DIRS
         "."
 )
