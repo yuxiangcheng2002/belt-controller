@@ -6,6 +6,7 @@ Connects to Mac as a composite BLE HID device (keyboard + gamepad) via NimBLE.
 ## Architecture
 - `ble_hid.c/h` — Composite NimBLE HID: Report ID 1 (keyboard) + Report ID 2 (gamepad). Handles advertising, pairing, GATT services.
 - `dualkey_hw.c/h` — Button reading (GPIO0, GPIO17) and WS2812 LED on DualKey board.
+- `ws2812_encoder.c/h` — In-repo WS2812 RMT encoder used by `dualkey_hw`; replaces the external `espressif/led_strip` dependency.
 - `chain_joystick.c/h` — UART chain protocol for M5Stack Chain Joystick. Modular: deinits UART if not detected (power saving).
 - `app_main.c` — Profile switching, input mapping, LED feedback.
 
@@ -40,7 +41,10 @@ Key config:
 - "Just Works" pairing — macOS requires encryption for HID.
 - Joystick is modular: if probe fails, UART is deinitialized to save power. Runs buttons-only.
 - Both-button simultaneous press is reserved for profile toggle, never sent as input.
+- Profile switch confirms on full both-button release, so the whole hold gesture is consumed and never leaks normal input.
+- Idle wake uses button polling instead of relying on GPIO0 ISR wake behavior, which is flaky on this board's strapping pin.
 - LED refresh rate-limited to ~33Hz (30ms) — 200Hz (every 5ms poll) caused Interrupt WDT timeout because RMT refresh is slow.
+- WS2812 output uses a tiny in-repo RMT encoder/driver instead of the component-manager `espressif/led_strip` package.
 - Joystick UART reads rate-limited to ~50Hz (20ms) to avoid blocking.
 - Joystick LED commands (set_brightness, set_rgb) only at startup/profile-change — each does full UART round-trip with 50ms timeout, can't be in hot loop.
 - No `ble_gap_update_params` calls — macOS rejects slave latency changes and drops the connection.

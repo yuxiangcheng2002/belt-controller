@@ -3,10 +3,30 @@
 #include "board_pins.h"
 
 #include "driver/gpio.h"
+#include "driver/rmt_tx.h"
 #include "esp_check.h"
-#include "led_strip.h"
+#include "ws2812_encoder.h"
 
-static led_strip_handle_t s_led_strip;
+static rmt_channel_handle_t s_led_chan;
+static rmt_encoder_handle_t s_led_encoder;
+static uint8_t s_led_pixels[DUALKEY_LED_COUNT * 3];
+
+static esp_err_t dualkey_refresh(void)
+{
+    if (s_led_chan == NULL || s_led_encoder == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    rmt_transmit_config_t tx_config = {
+        .loop_count = 0,
+        .flags.eot_level = 0,
+    };
+
+    ESP_RETURN_ON_ERROR(
+        rmt_transmit(s_led_chan, s_led_encoder, s_led_pixels, sizeof(s_led_pixels), &tx_config),
+        "dualkey_hw", "Failed to transmit LED pixels");
+    return rmt_tx_wait_all_done(s_led_chan, -1);
+}
 
 esp_err_t dualkey_hw_init(void)
 {
@@ -24,26 +44,27 @@ esp_err_t dualkey_hw_init(void)
                         "Failed to init LED power GPIO");
     ESP_RETURN_ON_ERROR(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, 0), "dualkey_hw", "Failed to enable LED power");
 
-    const led_strip_config_t strip_config = {
-        .strip_gpio_num = DUALKEY_WS2812_GPIO,
-        .max_leds = DUALKEY_LED_COUNT,
-        .led_model = LED_MODEL_WS2812,
-        .led_pixel_format = LED_PIXEL_FORMAT_GRB,
-        .flags = {
-            .invert_out = false,
-        },
-    };
-    const led_strip_rmt_config_t rmt_config = {
+    const rmt_tx_channel_config_t tx_config = {
+        .gpio_num = DUALKEY_WS2812_GPIO,
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = 10 * 1000 * 1000,
         .mem_block_symbols = 64,
+        .trans_queue_depth = 1,
         .flags = {
+            .invert_out = false,
             .with_dma = false,
         },
     };
+    const ws2812_encoder_config_t encoder_config = {
+        .resolution_hz = tx_config.resolution_hz,
+    };
 
-    ESP_RETURN_ON_ERROR(led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led_strip), "dualkey_hw",
-                        "Failed to init LED strip");
+    ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_config, &s_led_chan), "dualkey_hw",
+                        "Failed to init LED RMT channel");
+    ESP_RETURN_ON_ERROR(ws2812_new_encoder(&encoder_config, &s_led_encoder), "dualkey_hw",
+                        "Failed to init LED encoder");
+    ESP_RETURN_ON_ERROR(rmt_enable(s_led_chan), "dualkey_hw", "Failed to enable LED RMT channel");
+
     return dualkey_set_rgb(0, 0, 0, true);
 }
 
@@ -59,37 +80,49 @@ dualkey_buttons_t dualkey_read_buttons(void)
 
 esp_err_t dualkey_set_led(int index, uint8_t r, uint8_t g, uint8_t b)
 {
-    if (s_led_strip == NULL) {
+    if (s_led_chan == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     if (index < 0 || index >= DUALKEY_LED_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, index, r, g, b));
-    return led_strip_refresh(s_led_strip);
+    size_t pixel = (size_t)index * 3;
+    s_led_pixels[pixel + 0] = g;
+    s_led_pixels[pixel + 1] = r;
+    s_led_pixels[pixel + 2] = b;
+    return dualkey_refresh();
 }
 
 esp_err_t dualkey_set_leds(uint8_t r0, uint8_t g0, uint8_t b0,
                            uint8_t r1, uint8_t g1, uint8_t b1)
 {
-    if (s_led_strip == NULL) return ESP_ERR_INVALID_STATE;
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, r0, g0, b0));
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 1, r1, g1, b1));
-    return led_strip_refresh(s_led_strip);
+    if (s_led_chan == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_led_pixels[0] = g0;
+    s_led_pixels[1] = r0;
+    s_led_pixels[2] = b0;
+    s_led_pixels[3] = g1;
+    s_led_pixels[4] = r1;
+    s_led_pixels[5] = b1;
+    return dualkey_refresh();
 }
 
 esp_err_t dualkey_set_rgb(uint8_t r, uint8_t g, uint8_t b, bool enabled)
 {
-    if (s_led_strip == NULL) {
+    if (s_led_chan == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
     ESP_ERROR_CHECK(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 0 : 1));
     for (int i = 0; i < DUALKEY_LED_COUNT; i++) {
-        ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, r, g, b));
+        s_led_pixels[i * 3 + 0] = g;
+        s_led_pixels[i * 3 + 1] = r;
+        s_led_pixels[i * 3 + 2] = b;
     }
-    return led_strip_refresh(s_led_strip);
+    return dualkey_refresh();
 }
 
 esp_err_t dualkey_led_power(bool enabled)
