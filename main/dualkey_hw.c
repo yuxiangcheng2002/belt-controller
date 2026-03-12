@@ -19,9 +19,10 @@ esp_err_t dualkey_hw_init(void)
     };
 
     ESP_RETURN_ON_ERROR(gpio_config(&input_config), "dualkey_hw", "Failed to init button GPIOs");
-    ESP_RETURN_ON_ERROR(gpio_set_direction(DUALKEY_WS2812_POWER_GPIO, GPIO_MODE_OUTPUT), "dualkey_hw",
+    /* LED power pin is open-drain, active-low on Chain DualKey */
+    ESP_RETURN_ON_ERROR(gpio_set_direction(DUALKEY_WS2812_POWER_GPIO, GPIO_MODE_OUTPUT_OD), "dualkey_hw",
                         "Failed to init LED power GPIO");
-    ESP_RETURN_ON_ERROR(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, 1), "dualkey_hw", "Failed to enable LED power");
+    ESP_RETURN_ON_ERROR(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, 0), "dualkey_hw", "Failed to enable LED power");
 
     const led_strip_config_t strip_config = {
         .strip_gpio_num = DUALKEY_WS2812_GPIO,
@@ -69,13 +70,22 @@ esp_err_t dualkey_set_led(int index, uint8_t r, uint8_t g, uint8_t b)
     return led_strip_refresh(s_led_strip);
 }
 
+esp_err_t dualkey_set_leds(uint8_t r0, uint8_t g0, uint8_t b0,
+                           uint8_t r1, uint8_t g1, uint8_t b1)
+{
+    if (s_led_strip == NULL) return ESP_ERR_INVALID_STATE;
+    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, r0, g0, b0));
+    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 1, r1, g1, b1));
+    return led_strip_refresh(s_led_strip);
+}
+
 esp_err_t dualkey_set_rgb(uint8_t r, uint8_t g, uint8_t b, bool enabled)
 {
     if (s_led_strip == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_ERROR_CHECK(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 1 : 0));
+    ESP_ERROR_CHECK(gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 0 : 1));
     for (int i = 0; i < DUALKEY_LED_COUNT; i++) {
         ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, i, r, g, b));
     }
@@ -84,5 +94,5 @@ esp_err_t dualkey_set_rgb(uint8_t r, uint8_t g, uint8_t b, bool enabled)
 
 esp_err_t dualkey_led_power(bool enabled)
 {
-    return gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 1 : 0);
+    return gpio_set_level(DUALKEY_WS2812_POWER_GPIO, enabled ? 0 : 1);
 }

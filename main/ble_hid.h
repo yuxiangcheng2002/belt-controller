@@ -24,4 +24,8 @@ bool      ble_hid_connected(void);
 esp_err_t ble_hid_send_keyboard(const ble_hid_kb_report_t *report);
 esp_err_t ble_hid_send_gamepad(const ble_hid_gp_report_t *report);
 
+/* Connection interval control for power management */
+esp_err_t ble_hid_conn_fast(void);   /* ~15ms interval — active input */
+esp_err_t ble_hid_conn_slow(void);   /* ~1000ms interval — idle/sleep */
+
 #endif

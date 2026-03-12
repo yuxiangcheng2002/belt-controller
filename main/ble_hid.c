@@ -11,7 +11,6 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
-#include "store/config/ble_store_config.h"
 
 static const char *TAG = "ble_hid";
 
@@ -307,6 +306,17 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ENC_CHANGE:
         ESP_LOGI(TAG, "Encryption changed, status=%d", event->enc_change.status);
+        if (event->enc_change.status != 0) {
+            /* Encryption failed (e.g. stale bonding key) — delete the peer's
+               bond and disconnect so the next connection starts fresh. */
+            ESP_LOGW(TAG, "Encryption failed — clearing bond and disconnecting");
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
+            ble_gap_terminate(event->enc_change.conn_handle,
+                              BLE_ERR_REM_USER_CONN_TERM);
+        }
         break;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -333,13 +343,18 @@ static void start_advertising(void)
     fields.name = (const uint8_t *)s_device_name;
     fields.name_len = strlen(s_device_name);
     fields.name_is_complete = 1;
-    fields.appearance = 0x03C0;  /* Generic HID (composite keyboard + gamepad) */
+    fields.appearance = 0x03C1;  /* Keyboard */
     fields.appearance_is_present = 1;
     fields.uuids16 = (ble_uuid16_t[]) { BLE_UUID16_INIT(0x1812) };
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
 
     ble_gap_adv_set_fields(&fields);
+
+    /* Set preferred connection parameters via GAP service —
+       macOS reads these and picks an appropriate interval.
+       No explicit ble_gap_update_params needed. */
+    ble_svc_gap_device_appearance_set(0x03C1);
 
     struct ble_gap_adv_params params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
@@ -400,14 +415,13 @@ esp_err_t ble_hid_init(const char *device_name)
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_svc_gap_device_name_set(s_device_name);
-    ble_svc_gap_device_appearance_set(0x03C0);
+    ble_svc_gap_device_appearance_set(0x03C1);  /* Keyboard — macOS uses fast interval for HID */
 
     int rc = ble_gatts_count_cfg(gatt_svcs);
     assert(rc == 0);
     rc = ble_gatts_add_svcs(gatt_svcs);
     assert(rc == 0);
 
-    ble_store_config_init();
     nimble_port_freertos_init(nimble_host_task);
     return ESP_OK;
 }
@@ -440,5 +454,39 @@ esp_err_t ble_hid_send_gamepad(const ble_hid_gp_report_t *report)
         return ESP_ERR_NO_MEM;
     }
     int rc = ble_gatts_notify_custom(s_conn_handle, s_gp_report_handle, om);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t ble_hid_conn_fast(void)
+{
+    if (!s_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    struct ble_gap_upd_params params = {
+        .itvl_min = 12,              /* 12 × 1.25ms = 15ms */
+        .itvl_max = 16,              /* 16 × 1.25ms = 20ms */
+        .latency = 0,
+        .supervision_timeout = 400,  /* 400 × 10ms = 4s */
+    };
+    int rc = ble_gap_update_params(s_conn_handle, &params);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t ble_hid_conn_slow(void)
+{
+    if (!s_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Slave latency: keep 15ms interval but allow skipping up to 66 events.
+       Peripheral stays silent for ~1s when idle (same power as 1000ms interval)
+       but responds at the very next 15ms event when it has data to send.
+       supervision_timeout must be > (1 + latency) × interval × 2 = 2010ms */
+    struct ble_gap_upd_params params = {
+        .itvl_min = 12,              /* 12 × 1.25ms = 15ms */
+        .itvl_max = 16,              /* 16 × 1.25ms = 20ms */
+        .latency = 66,              /* skip up to 66 events (~1s silence) */
+        .supervision_timeout = 400,  /* 400 × 10ms = 4s */
+    };
+    int rc = ble_gap_update_params(s_conn_handle, &params);
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }

@@ -4,8 +4,9 @@
 #include "driver/uart.h"
 
 #define APP_DEVICE_NAME            "Belt Controller"
-#define APP_POLL_PERIOD_MS         20
-#define APP_IDLE_LED_TIMEOUT_MS    3000
+#define APP_POLL_PERIOD_MS         5      /* Fast poll — GPIO 0 ISR unreliable (strapping pin) */
+#define APP_IDLE_TIMEOUT_MS        30000     /* 30s no input → idle (LEDs off, slave latency, light sleep) */
+#define APP_DEEP_SLEEP_TIMEOUT_MS  1800000  /* 30 min idle → deep sleep (BLE disconnects, ~108μA) */
 #define APP_PROFILE_TOGGLE_MS      2000   /* hold both buttons to switch */
 
 /* Joystick thresholds for keyboard arrow mapping (0–4095 range, center ~2048) */

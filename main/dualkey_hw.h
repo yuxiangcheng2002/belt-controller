@@ -22,6 +22,10 @@ dualkey_buttons_t dualkey_read_buttons(void);
 /* Set a single LED by index (0 = right key, 1 = left key) */
 esp_err_t dualkey_set_led(int index, uint8_t r, uint8_t g, uint8_t b);
 
+/* Set both LEDs individually in one refresh */
+esp_err_t dualkey_set_leds(uint8_t r0, uint8_t g0, uint8_t b0,
+                           uint8_t r1, uint8_t g1, uint8_t b1);
+
 /* Set both LEDs to the same color */
 esp_err_t dualkey_set_rgb(uint8_t r, uint8_t g, uint8_t b, bool enabled);
 

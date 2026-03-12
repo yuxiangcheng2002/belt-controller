@@ -16,7 +16,6 @@ static const char *TAG = "chain_joystick";
 #define CHAIN_CMD_SET_RGB_LIGHT 0x22
 #define CHAIN_CMD_GET_DEVICE_TYPE 0xFB
 #define CHAIN_CMD_GET_16ADC 0x30
-
 #define CHAIN_DEVICE_TYPE_JOYSTICK 0x0004
 
 static uint8_t chain_crc(const uint8_t *buffer, size_t size)
@@ -152,28 +151,36 @@ esp_err_t chain_joystick_init(chain_joystick_t *ctx, uart_port_t uart_port, int 
 
 esp_err_t chain_joystick_probe(chain_joystick_t *ctx)
 {
-    uint8_t packet[16] = {0};
-    size_t packet_len = sizeof(packet);
-    esp_err_t err = chain_send_command(ctx, CHAIN_CMD_GET_DEVICE_TYPE, NULL, 0);
-    if (err != ESP_OK) {
-        return err;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        uint8_t packet[16] = {0};
+        size_t pkt_len = sizeof(packet);
+
+        esp_err_t err = chain_send_command(ctx, CHAIN_CMD_GET_DEVICE_TYPE, NULL, 0);
+        if (err != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        err = chain_read_response(ctx, CHAIN_CMD_GET_DEVICE_TYPE, packet, &pkt_len);
+        if (err != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        const uint16_t device_type = (uint16_t)packet[6] | ((uint16_t)packet[7] << 8);
+        if (device_type == CHAIN_DEVICE_TYPE_JOYSTICK) {
+            ctx->present = true;
+            ESP_LOGI(TAG, "Chain joystick detected at ID %u", ctx->device_id);
+            return ESP_OK;
+        }
+
+        ESP_LOGW(TAG, "Probe attempt %d: device type 0x%04X (not joystick)",
+                 attempt + 1, device_type);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    err = chain_read_response(ctx, CHAIN_CMD_GET_DEVICE_TYPE, packet, &packet_len);
-    if (err != ESP_OK) {
-        ctx->present = false;
-        return err;
-    }
-
-    const uint16_t device_type = (uint16_t)packet[6] | ((uint16_t)packet[7] << 8);
-    ctx->present = device_type == CHAIN_DEVICE_TYPE_JOYSTICK;
-    if (!ctx->present) {
-        ESP_LOGW(TAG, "Unexpected chain device type: 0x%04X", device_type);
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    ESP_LOGI(TAG, "Chain joystick detected at ID %u", ctx->device_id);
-    return ESP_OK;
+    ctx->present = false;
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t chain_joystick_read_raw(chain_joystick_t *ctx, chain_joystick_sample_t *sample)

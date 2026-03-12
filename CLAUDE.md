@@ -10,7 +10,7 @@ Connects to Mac as a composite BLE HID device (keyboard + gamepad) via NimBLE.
 - `app_main.c` — Profile switching, input mapping, LED feedback.
 
 ## Profiles
-- **Keyboard** (blue LED): Joystick left/right → arrow keys, Button A → Enter, Button B → Escape. Great for presentations.
+- **Keyboard** (blue LED): Joystick left/right → arrow keys, Button A → Left, Button B → Right. Great for presentations.
 - **Gamepad** (green LED): Raw joystick X/Y + 2 buttons as HID gamepad.
 - **Toggle**: Hold both buttons for 2 seconds. White flash confirms switch.
 
@@ -20,12 +20,51 @@ idf.py set-target esp32s3
 idf.py build
 idf.py -p /dev/tty.usbmodemXXXX flash monitor
 ```
+Requires Python 3.11: `export PATH="/Library/Frameworks/Python.framework/Versions/3.11/bin:$PATH"`
+
+## Power management
+Three-tier model: **ACTIVE** → **IDLE** → **DEEP SLEEP**.
+
+- **ACTIVE** (~55mA): BLE 15ms interval, latency 0, 20ms poll loop, LEDs on.
+- **IDLE** (after 30s, ~1–3mA): LEDs + power rail off, light sleep via tickless idle. Button press wakes instantly.
+- **DEEP SLEEP** (after 30min idle, ~108μA): Full deep sleep. BLE disconnects. Bonding keys persist in NVS. Button press reboots chip → BLE reconnects (~1–2s). Profile survives via `RTC_DATA_ATTR`.
+
+Key config:
+- `CONFIG_PM_ENABLE=y` + `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y`
+- `CONFIG_BT_NIMBLE_NVS_PERSIST=y` — bonding survives deep sleep/reboot
+- `esp_sleep_enable_ext1_wakeup_io()` on GPIO0 + GPIO17 for deep sleep wake
+- `gpio_wakeup_enable()` on both buttons for light sleep wake
 
 ## Key decisions
 - Composite HID (keyboard + gamepad in one descriptor) — no re-pairing needed when switching profiles.
 - "Just Works" pairing — macOS requires encryption for HID.
 - Joystick is modular: if probe fails, UART is deinitialized to save power. Runs buttons-only.
 - Both-button simultaneous press is reserved for profile toggle, never sent as input.
+- LED refresh rate-limited to ~33Hz (30ms) — 200Hz (every 5ms poll) caused Interrupt WDT timeout because RMT refresh is slow.
+- Joystick UART reads rate-limited to ~50Hz (20ms) to avoid blocking.
+- Joystick LED commands (set_brightness, set_rgb) only at startup/profile-change — each does full UART round-trip with 50ms timeout, can't be in hot loop.
+- No `ble_gap_update_params` calls — macOS rejects slave latency changes and drops the connection.
+- Appearance 0x03C1 (Keyboard) so macOS auto-selects fast HID interval.
+- BLE encryption error handler: on ENC_CHANGE failure (stale bond), clears bond and disconnects for clean reconnection.
 
 ## Dead ends / constraints
 - Single HID descriptor approach (gamepad only) doesn't work for presentation arrow keys — macOS needs keyboard HID for that.
+- `CONFIG_BT_LE_SLEEP_ENABLE` does not exist for ESP32-S3 — only for C2/C5/C6/H2. S3 BT controller sleeps automatically via PM framework.
+- `ble_store_config_init()` removed in ESP-IDF 5.5 NimBLE — store auto-inits when `CONFIG_BT_NIMBLE_NVS_PERSIST=y`.
+- Arduino ESP32 2.0.x port failed: Adafruit NeoPixel and `neopixelWrite` both fail to drive WS2812 LEDs on this board. USB CDC serial output never worked either. Multiple platform incompatibilities with 2MB flash ESP32-S3.
+
+## Joystick knowledge (not yet in code)
+These findings are from debugging but not currently implemented — the code uses the simple probe (GET_DEVICE_TYPE only) on the RIGHT connector:
+
+- **Working connector**: LEFT UART2, TX=GPIO6, RX=GPIO5 (normal pin orientation)
+- **Joystick requires enumeration** before responding to device-specific commands:
+  1. Heartbeat (0xFD) broadcast to ID 0xFF — wakes the bus
+  2. Enumerate (0xFE) broadcast with payload 0x00 — assigns IDs, returns device count
+  3. Then GET_DEVICE_TYPE (0xFB) to ID 1 works
+- Without enumeration, joystick never responds to GET_DEVICE_TYPE
+- Chain bus packet format: `AA 55 [len_lo len_hi] [id] [cmd] [payload...] [crc] 55 AA`
+
+## 3-position switch (not yet implemented)
+- GPIO 7 (SW_RAIN): high when switch in leftmost position
+- GPIO 8 (SW_BLE): high when switch in rightmost position
+- Plan: leftmost = deep sleep / off, other positions = on

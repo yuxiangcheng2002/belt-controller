@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Belt Controller Test</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+  }
+  h1 { font-size: 24px; margin-bottom: 8px; color: #fff; }
+  .subtitle { color: #888; font-size: 14px; margin-bottom: 40px; }
+
+  .section { margin-bottom: 40px; width: 100%; max-width: 600px; }
+  .section-title {
+    font-size: 14px; text-transform: uppercase; letter-spacing: 2px;
+    color: #888; margin-bottom: 16px; text-align: center;
+  }
+
+  /* BLE section */
+  .ble-panel {
+    background: #111122;
+    border: 1px solid #334;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .ble-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid #222;
+    font-size: 13px;
+  }
+  .ble-row:last-child { border-bottom: none; }
+  .ble-label { color: #888; }
+  .ble-value { font-family: monospace; color: #e0e0e0; }
+  .ble-value.connected { color: #44cc66; }
+  .ble-value.disconnected { color: #ff4466; }
+  .ble-value.connecting { color: #ffaa44; }
+
+  .ble-btn {
+    display: block;
+    margin: 16px auto 0;
+    padding: 10px 28px;
+    background: #4466ff;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .ble-btn:hover { background: #5577ff; }
+  .ble-btn:active { transform: scale(0.97); }
+  .ble-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  .ble-btn.disconnect { background: #ff4466; }
+  .ble-btn.disconnect:hover { background: #ff5577; }
+
+  .ble-services {
+    margin-top: 12px;
+    font-size: 12px;
+    font-family: monospace;
+    color: #666;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  .ble-svc { padding: 3px 0; }
+  .ble-svc.known { color: #aaa; }
+  .ble-char { padding: 2px 0 2px 16px; color: #555; }
+  .ble-char-val { color: #88aaff; }
+
+  .ble-uptime {
+    font-family: monospace; font-size: 12px; color: #666;
+    text-align: center; margin-top: 8px;
+  }
+
+  /* Keyboard profile */
+  .keys {
+    display: flex; justify-content: center; gap: 16px;
+  }
+  .key {
+    width: 100px; height: 100px;
+    border: 2px solid #334;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 32px;
+    transition: all 0.08s ease;
+    background: #222244;
+    user-select: none;
+  }
+  .key.active {
+    background: #4466ff;
+    border-color: #6688ff;
+    box-shadow: 0 0 30px rgba(68, 102, 255, 0.5);
+    transform: scale(1.05);
+  }
+  .key-label {
+    font-size: 12px; color: #666; text-align: center; margin-top: 8px;
+  }
+
+  /* Gamepad profile */
+  .gamepad-container {
+    display: flex; justify-content: center; align-items: center; gap: 40px;
+  }
+  .stick-area {
+    width: 180px; height: 180px;
+    border: 2px solid #334;
+    border-radius: 50%;
+    position: relative;
+    background: #222244;
+  }
+  .stick-dot {
+    width: 24px; height: 24px;
+    background: #44cc66;
+    border-radius: 50%;
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    transition: all 0.05s ease;
+    box-shadow: 0 0 12px rgba(68, 204, 102, 0.4);
+  }
+  .stick-crosshair {
+    position: absolute;
+    background: #333;
+  }
+  .stick-crosshair.h { width: 100%; height: 1px; top: 50%; }
+  .stick-crosshair.v { height: 100%; width: 1px; left: 50%; }
+
+  .gp-buttons {
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .gp-btn {
+    width: 64px; height: 64px;
+    border: 2px solid #334;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600;
+    background: #222244;
+    transition: all 0.08s ease;
+  }
+  .gp-btn.active {
+    background: #44cc66;
+    border-color: #66ee88;
+    box-shadow: 0 0 20px rgba(68, 204, 102, 0.5);
+  }
+
+  .axis-values {
+    text-align: center; margin-top: 12px;
+    font-family: monospace; font-size: 13px; color: #666;
+  }
+
+  /* Event log */
+  .log {
+    width: 100%; max-width: 600px;
+    background: #111122;
+    border: 1px solid #334;
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .log-entry { color: #888; }
+  .log-entry.press { color: #4466ff; }
+  .log-entry.release { color: #666; }
+  .log-entry.gamepad { color: #44cc66; }
+  .log-entry.ble { color: #88aaff; }
+  .log-entry.ble-err { color: #ff4466; }
+
+  /* Status bar */
+  .status {
+    display: flex; gap: 20px; margin-bottom: 30px;
+    font-size: 13px;
+  }
+  .status-item {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #444;
+  }
+  .status-dot.on { background: #44cc66; box-shadow: 0 0 8px rgba(68,204,102,0.5); }
+  .status-dot.warn { background: #ffaa44; box-shadow: 0 0 8px rgba(255,170,68,0.5); }
+
+  .hint {
+    color: #555; font-size: 12px; text-align: center;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Belt Controller Test</h1>
+<p class="subtitle">BLE connection + keyboard/gamepad input test</p>
+
+<div class="status">
+  <div class="status-item">
+    <div class="status-dot" id="ble-status"></div>
+    <span id="ble-status-text">BLE: disconnected</span>
+  </div>
+  <div class="status-item">
+    <div class="status-dot" id="kb-status"></div>
+    <span>Keyboard</span>
+  </div>
+  <div class="status-item">
+    <div class="status-dot" id="gp-status"></div>
+    <span id="gp-status-text">Gamepad</span>
+  </div>
+</div>
+
+<!-- BLE section -->
+<div class="section">
+  <div class="section-title">BLE Connection</div>
+  <div class="ble-panel">
+    <div class="ble-row">
+      <span class="ble-label">Device</span>
+      <span class="ble-value" id="ble-device">--</span>
+    </div>
+    <div class="ble-row">
+      <span class="ble-label">Status</span>
+      <span class="ble-value disconnected" id="ble-conn-status">Disconnected</span>
+    </div>
+    <div class="ble-row">
+      <span class="ble-label">Connected for</span>
+      <span class="ble-value" id="ble-conn-time">--</span>
+    </div>
+    <div class="ble-row">
+      <span class="ble-label">Disconnects</span>
+      <span class="ble-value" id="ble-disconnects">0</span>
+    </div>
+    <div class="ble-row">
+      <span class="ble-label">Services</span>
+      <span class="ble-value" id="ble-svc-count">--</span>
+    </div>
+    <div class="ble-services" id="ble-services"></div>
+    <button class="ble-btn" id="ble-btn" onclick="bleConnect()">Connect BLE</button>
+  </div>
+</div>
+
+<!-- Keyboard section -->
+<div class="section">
+  <div class="section-title">Keyboard Profile (Blue)</div>
+  <div class="keys">
+    <div>
+      <div class="key" id="key-left">&larr;</div>
+      <div class="key-label">Left Arrow</div>
+    </div>
+    <div>
+      <div class="key" id="key-right">&rarr;</div>
+      <div class="key-label">Right Arrow</div>
+    </div>
+  </div>
+</div>
+
+<!-- Gamepad section -->
+<div class="section">
+  <div class="section-title">Gamepad Profile (Green)</div>
+  <div class="gamepad-container">
+    <div>
+      <div class="stick-area">
+        <div class="stick-crosshair h"></div>
+        <div class="stick-crosshair v"></div>
+        <div class="stick-dot" id="stick-dot"></div>
+      </div>
+      <div class="axis-values" id="axis-values">X: 0.00 &nbsp; Y: 0.00</div>
+    </div>
+    <div class="gp-buttons">
+      <div class="gp-btn" id="gp-btn-0">A</div>
+      <div class="gp-btn" id="gp-btn-1">B</div>
+    </div>
+  </div>
+  <p class="hint" id="gp-hint">Connect gamepad to see input</p>
+</div>
+
+<!-- Input Reference -->
+<div class="section">
+  <div class="section-title">Input Reference</div>
+  <div class="ble-panel" style="font-size: 13px; line-height: 1.8;">
+    <table style="width: 100%; border-collapse: collapse;">
+      <thead>
+        <tr style="border-bottom: 1px solid #334; color: #888;">
+          <th style="text-align: left; padding: 4px 8px; font-weight: 500;">Input</th>
+          <th style="text-align: left; padding: 4px 8px; font-weight: 500;">Keyboard Profile</th>
+          <th style="text-align: left; padding: 4px 8px; font-weight: 500;">Gamepad Profile</th>
+        </tr>
+      </thead>
+      <tbody style="font-family: monospace;">
+        <tr style="border-bottom: 1px solid #1a1a2e;">
+          <td style="padding: 6px 8px; color: #aaa;">Left button (A)</td>
+          <td style="padding: 6px 8px; color: #88aaff;">Left Arrow</td>
+          <td style="padding: 6px 8px; color: #66cc88;">Button 0 + X=0</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #1a1a2e;">
+          <td style="padding: 6px 8px; color: #aaa;">Right button (B)</td>
+          <td style="padding: 6px 8px; color: #88aaff;">Right Arrow</td>
+          <td style="padding: 6px 8px; color: #66cc88;">Button 1 + X=max</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #1a1a2e;">
+          <td style="padding: 6px 8px; color: #aaa;">Joystick left</td>
+          <td style="padding: 6px 8px; color: #88aaff;">Left Arrow</td>
+          <td style="padding: 6px 8px; color: #66cc88;">X axis (raw)</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #1a1a2e;">
+          <td style="padding: 6px 8px; color: #aaa;">Joystick right</td>
+          <td style="padding: 6px 8px; color: #88aaff;">Right Arrow</td>
+          <td style="padding: 6px 8px; color: #66cc88;">X axis (raw)</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #1a1a2e;">
+          <td style="padding: 6px 8px; color: #aaa;">Hold both 2s</td>
+          <td style="padding: 6px 8px;" colspan="2" style="color: #ffaa44;">Toggle profile (white flash)</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top: 12px; color: #555; font-size: 12px;">
+      <div><span style="color: #4466ff;">Blue LEDs</span> = Keyboard profile &nbsp; <span style="color: #44cc66;">Green LEDs</span> = Gamepad profile</div>
+      <div style="margin-top: 4px;">Idle timeout: 30s (LEDs off) &rarr; Deep sleep: 30min (BLE disconnects, button press reboots)</div>
+    </div>
+  </div>
+</div>
+
+<!-- Log -->
+<div class="section">
+  <div class="section-title">Event Log</div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+const logEl = document.getElementById('log');
+const kbStatus = document.getElementById('kb-status');
+const gpStatus = document.getElementById('gp-status');
+const gpStatusText = document.getElementById('gp-status-text');
+const gpHint = document.getElementById('gp-hint');
+const stickDot = document.getElementById('stick-dot');
+const axisValues = document.getElementById('axis-values');
+const bleStatusDot = document.getElementById('ble-status');
+const bleStatusText = document.getElementById('ble-status-text');
+const bleDeviceEl = document.getElementById('ble-device');
+const bleConnStatusEl = document.getElementById('ble-conn-status');
+const bleConnTimeEl = document.getElementById('ble-conn-time');
+const bleDisconnectsEl = document.getElementById('ble-disconnects');
+const bleSvcCountEl = document.getElementById('ble-svc-count');
+const bleServicesEl = document.getElementById('ble-services');
+const bleBtn = document.getElementById('ble-btn');
+
+let logCount = 0;
+const MAX_LOG = 200;
+
+function log(msg, cls) {
+  const div = document.createElement('div');
+  div.className = 'log-entry ' + (cls || '');
+  const ts = new Date().toLocaleTimeString('en', { hour12: false, fractionalSecondDigits: 1 });
+  div.textContent = `[${ts}] ${msg}`;
+  logEl.appendChild(div);
+  logCount++;
+  if (logCount > MAX_LOG) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Well-known GATT service UUIDs
+const KNOWN_SERVICES = {
+  '00001800-0000-1000-8000-00805f9b34fb': 'Generic Access (0x1800)',
+  '00001801-0000-1000-8000-00805f9b34fb': 'Generic Attribute (0x1801)',
+  '0000180a-0000-1000-8000-00805f9b34fb': 'Device Information (0x180A)',
+  '0000180f-0000-1000-8000-00805f9b34fb': 'Battery Service (0x180F)',
+  '00001812-0000-1000-8000-00805f9b34fb': 'HID Service (0x1812)',
+};
+
+const KNOWN_CHARS = {
+  '00002a00-0000-1000-8000-00805f9b34fb': 'Device Name',
+  '00002a01-0000-1000-8000-00805f9b34fb': 'Appearance',
+  '00002a04-0000-1000-8000-00805f9b34fb': 'Preferred Conn Params',
+  '00002a19-0000-1000-8000-00805f9b34fb': 'Battery Level',
+  '00002a24-0000-1000-8000-00805f9b34fb': 'Model Number',
+  '00002a25-0000-1000-8000-00805f9b34fb': 'Serial Number',
+  '00002a26-0000-1000-8000-00805f9b34fb': 'Firmware Revision',
+  '00002a27-0000-1000-8000-00805f9b34fb': 'Hardware Revision',
+  '00002a28-0000-1000-8000-00805f9b34fb': 'Software Revision',
+  '00002a29-0000-1000-8000-00805f9b34fb': 'Manufacturer Name',
+  '00002a4a-0000-1000-8000-00805f9b34fb': 'HID Information',
+  '00002a4b-0000-1000-8000-00805f9b34fb': 'Report Map',
+  '00002a4d-0000-1000-8000-00805f9b34fb': 'Report',
+  '00002a4e-0000-1000-8000-00805f9b34fb': 'Protocol Mode',
+  '00002a05-0000-1000-8000-00805f9b34fb': 'Service Changed',
+};
+
+// --- BLE ---
+let bleDevice = null;
+let bleServer = null;
+let bleConnectedAt = null;
+let bleDisconnectCount = 0;
+let bleUptimeInterval = null;
+
+function setBleState(state) {
+  bleConnStatusEl.className = 'ble-value ' + state;
+  bleStatusDot.className = 'status-dot';
+  if (state === 'connected') {
+    bleConnStatusEl.textContent = 'Connected';
+    bleStatusDot.classList.add('on');
+    bleStatusText.textContent = 'BLE: connected';
+    bleBtn.textContent = 'Disconnect';
+    bleBtn.className = 'ble-btn disconnect';
+    bleBtn.disabled = false;
+    bleBtn.onclick = bleDisconnect;
+  } else if (state === 'connecting') {
+    bleConnStatusEl.textContent = 'Connecting...';
+    bleStatusDot.classList.add('warn');
+    bleStatusText.textContent = 'BLE: connecting';
+    bleBtn.disabled = true;
+    bleBtn.textContent = 'Connecting...';
+  } else {
+    bleConnStatusEl.textContent = 'Disconnected';
+    bleStatusText.textContent = 'BLE: disconnected';
+    bleBtn.textContent = 'Connect BLE';
+    bleBtn.className = 'ble-btn';
+    bleBtn.disabled = false;
+    bleBtn.onclick = bleConnect;
+  }
+}
+
+function updateUptime() {
+  if (!bleConnectedAt) { bleConnTimeEl.textContent = '--'; return; }
+  const secs = Math.floor((Date.now() - bleConnectedAt) / 1000);
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  bleConnTimeEl.textContent = `${m}m ${s.toString().padStart(2, '0')}s`;
+}
+
+function hexString(buffer) {
+  return [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+}
+
+async function bleConnect() {
+  if (!navigator.bluetooth) {
+    log('Web Bluetooth not supported — use Chrome', 'ble-err');
+    return;
+  }
+
+  setBleState('connecting');
+  log('Requesting BLE device...', 'ble');
+
+  try {
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'Belt Controller' }],
+      optionalServices: [
+        'device_information',    // 0x180A
+        'battery_service',       // 0x180F
+        'generic_access',        // 0x1800
+      ],
+    });
+
+    bleDeviceEl.textContent = bleDevice.name || bleDevice.id;
+    log(`Device selected: ${bleDevice.name}`, 'ble');
+
+    bleDevice.addEventListener('gattserverdisconnected', onBleDisconnect);
+
+    log('Connecting GATT...', 'ble');
+    bleServer = await bleDevice.gatt.connect();
+
+    bleConnectedAt = Date.now();
+    setBleState('connected');
+    log('GATT connected', 'ble');
+
+    if (bleUptimeInterval) clearInterval(bleUptimeInterval);
+    bleUptimeInterval = setInterval(updateUptime, 1000);
+    updateUptime();
+
+    await discoverServices();
+
+  } catch (err) {
+    if (err.name === 'NotFoundError') {
+      log('Cancelled — no device selected', 'ble');
+    } else {
+      log(`BLE error: ${err.message}`, 'ble-err');
+    }
+    setBleState('disconnected');
+  }
+}
+
+function bleDisconnect() {
+  if (bleDevice && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+  }
+}
+
+function onBleDisconnect() {
+  bleDisconnectCount++;
+  bleDisconnectsEl.textContent = bleDisconnectCount;
+  const duration = bleConnectedAt
+    ? `after ${Math.floor((Date.now() - bleConnectedAt) / 1000)}s`
+    : '';
+  log(`BLE disconnected ${duration} (total: ${bleDisconnectCount})`, 'ble-err');
+  bleConnectedAt = null;
+  setBleState('disconnected');
+  if (bleUptimeInterval) { clearInterval(bleUptimeInterval); bleUptimeInterval = null; }
+  bleConnTimeEl.textContent = '--';
+}
+
+async function discoverServices() {
+  if (!bleServer) return;
+
+  try {
+    const services = await bleServer.getPrimaryServices();
+    bleSvcCountEl.textContent = services.length;
+    bleServicesEl.innerHTML = '';
+
+    log(`Found ${services.length} services`, 'ble');
+
+    for (const svc of services) {
+      const uuid = svc.uuid;
+      const name = KNOWN_SERVICES[uuid] || uuid;
+      const svcDiv = document.createElement('div');
+      svcDiv.className = 'ble-svc' + (KNOWN_SERVICES[uuid] ? ' known' : '');
+      svcDiv.textContent = name;
+      bleServicesEl.appendChild(svcDiv);
+      log(`  Service: ${name}`, 'ble');
+
+      // Try to read characteristics (will fail for HID — that's expected)
+      try {
+        const chars = await svc.getCharacteristics();
+        for (const ch of chars) {
+          const cName = KNOWN_CHARS[ch.uuid] || ch.uuid;
+          const charDiv = document.createElement('div');
+          charDiv.className = 'ble-char';
+
+          let valStr = '';
+          if (ch.properties.read) {
+            try {
+              const val = await ch.readValue();
+              // Try as UTF-8 string first
+              const bytes = new Uint8Array(val.buffer);
+              const isText = bytes.every(b => b >= 0x20 && b < 0x7f);
+              if (isText && bytes.length > 0) {
+                valStr = new TextDecoder().decode(val.buffer);
+              } else {
+                valStr = '0x' + hexString(val.buffer);
+              }
+            } catch (e) {
+              valStr = '(read blocked)';
+            }
+          }
+
+          charDiv.innerHTML = `${cName}` +
+            (valStr ? ` <span class="ble-char-val">= ${valStr}</span>` : '');
+          bleServicesEl.appendChild(charDiv);
+
+          if (valStr && valStr !== '(read blocked)') {
+            log(`    ${cName} = ${valStr}`, 'ble');
+          }
+        }
+      } catch (e) {
+        // Blocked service (e.g. HID)
+      }
+    }
+  } catch (err) {
+    log(`Service discovery error: ${err.message}`, 'ble-err');
+  }
+}
+
+// --- Keyboard ---
+const activeKeys = new Set();
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    if (!activeKeys.has(e.key)) {
+      activeKeys.add(e.key);
+      updateKeyVisuals();
+      log(`Key DOWN: ${e.key}`, 'press');
+    }
+    kbStatus.classList.add('on');
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    activeKeys.delete(e.key);
+    updateKeyVisuals();
+    log(`Key UP:   ${e.key}`, 'release');
+  }
+});
+
+function updateKeyVisuals() {
+  document.getElementById('key-left').classList.toggle('active', activeKeys.has('ArrowLeft'));
+  document.getElementById('key-right').classList.toggle('active', activeKeys.has('ArrowRight'));
+}
+
+// --- Gamepad ---
+let gpConnected = false;
+let lastGpState = { buttons: [false, false], axes: [0, 0] };
+
+window.addEventListener('gamepadconnected', (e) => {
+  gpConnected = true;
+  gpStatus.classList.add('on');
+  gpStatusText.textContent = `Gamepad: ${e.gamepad.id.substring(0, 30)}`;
+  gpHint.textContent = '';
+  log(`Gamepad connected: ${e.gamepad.id}`, 'gamepad');
+});
+
+window.addEventListener('gamepaddisconnected', (e) => {
+  gpConnected = false;
+  gpStatus.classList.remove('on');
+  gpStatusText.textContent = 'Gamepad';
+  gpHint.textContent = 'Connect gamepad to see input';
+  log(`Gamepad disconnected`, 'gamepad');
+});
+
+function pollGamepad() {
+  if (gpConnected) {
+    const gamepads = navigator.getGamepads();
+    let gp = null;
+    for (let i = 0; i < gamepads.length; i++) {
+      if (gamepads[i]) { gp = gamepads[i]; break; }
+    }
+
+    if (gp) {
+      for (let i = 0; i < 2 && i < gp.buttons.length; i++) {
+        const pressed = gp.buttons[i].pressed;
+        if (pressed !== lastGpState.buttons[i]) {
+          lastGpState.buttons[i] = pressed;
+          document.getElementById(`gp-btn-${i}`).classList.toggle('active', pressed);
+          const label = i === 0 ? 'A' : 'B';
+          log(`Gamepad Button ${label}: ${pressed ? 'PRESSED' : 'released'}`, 'gamepad');
+        }
+      }
+
+      const ax = gp.axes.length >= 2 ? [gp.axes[0], gp.axes[1]] : [0, 0];
+      const pctX = 50 + ax[0] * 40;
+      const pctY = 50 + ax[1] * 40;
+      stickDot.style.left = pctX + '%';
+      stickDot.style.top = pctY + '%';
+      axisValues.innerHTML = `X: ${ax[0].toFixed(2)} &nbsp; Y: ${ax[1].toFixed(2)}`;
+
+      const dx = Math.abs(ax[0] - lastGpState.axes[0]);
+      const dy = Math.abs(ax[1] - lastGpState.axes[1]);
+      if (dx > 0.05 || dy > 0.05) {
+        lastGpState.axes = [...ax];
+      }
+    }
+  }
+  requestAnimationFrame(pollGamepad);
+}
+
+pollGamepad();
+log('Ready — click "Connect BLE" or press arrow keys', '');
+</script>
+</body>
+</html>

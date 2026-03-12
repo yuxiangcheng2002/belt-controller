@@ -1,7 +1,9 @@
 build/
 sdkconfig
 sdkconfig.old
+sdkconfig 2
 managed_components/
 dependencies.lock
 .DS_Store
 npm-cache/
+.cache/
